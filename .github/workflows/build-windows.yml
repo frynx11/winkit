@@ -5,49 +5,76 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch: # دي بتخلّيك تقدر تشغيل الـ Build يدوياً من زرار في الموقع
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build installer and portable package
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python 3.12
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
+      - name: Set up Python (build machine only)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-    - name: Install Dependencies & PyInstaller
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
 
-    - name: Build with PyInstaller (Folder/Portable Mode)
-      run: |
-        pyinstaller --noconsole --onedir --name "WinKit" main.py
+      - name: Build self-contained WinKit folder
+        shell: pwsh
+        run: |
+          python -m PyInstaller --clean --noconfirm --windowed --onedir --name WinKit --collect-all PySide6 --collect-submodules psutil main.py
+          if (!(Test-Path "dist\WinKit\WinKit.exe")) {
+            throw "PyInstaller did not produce dist\WinKit\WinKit.exe"
+          }
 
-    - name: Compress Portable Version
-      run: |
-        Compress-Archive -Path "dist\WinKit\*" -DestinationPath "WinKit_Portable_2.0.0.zip"
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\WinKit" -DestinationPath "WinKit_Portable_2.0.0.zip" -CompressionLevel Optimal -Force
 
-    - name: Install Inno Setup
-      run: |
-        choco install innosetup -y
+      - name: Locate Inno Setup
+        id: inno
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $compiler = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            choco install innosetup --no-progress -y
+            $compiler = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $compiler) { throw "Inno Setup compiler (ISCC.exe) was not found." }
+          "path=$compiler" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-    - name: Compile Inno Setup Installer
-      run: |
-        # التأكد من مسار الكومبايلر الخاص بـ Inno Setup على سيرفر ويندوز
-        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "build_setup.iss"
-      shell: pwsh
+      - name: Compile Windows installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "Output" | Out-Null
+          & "${{ steps.inno.outputs.path }}" "build_setup.iss"
+          if (!(Test-Path "Output\WinKit_Setup_2.0.0.exe")) {
+            throw "Installer output was not created."
+          }
 
-    - name: Upload Build Artifacts (Setup & Portable)
-      uses: actions/upload-artifact@v4
-      with:
-        name: WinKit-Release-Files
-        path: |
-          WinKit_Portable_2.0.0.zip
-          Output/WinKit_Setup_2.0.0.exe
+      - name: Upload installer and portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinKit-Windows-2.0.0
+          path: |
+            Output/WinKit_Setup_2.0.0.exe
+            WinKit_Portable_2.0.0.zip
+          if-no-files-found: error
+          retention-days: 14
